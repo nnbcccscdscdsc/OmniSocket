@@ -1,6 +1,12 @@
 /*
  * tcp_impl.c
  * TCP 协议实现，带 16 字节包头解决粘包
+ *
+ * 设计说明：
+ * 1) TCP 是字节流，天然没有消息边界，因此这里通过“固定 16 字节头 + payload 长度”
+ *    显式划分消息边界，避免粘包/拆包带来的上层读取混乱。
+ * 2) 本层的头只用于“流边界管理”，上层业务仍可在 payload 中定义自己的消息头。
+ * 3) send/recv 均采用阻塞全量读写语义：要么完整收发一帧，要么返回错误/关闭状态。
  */
 
 #include "common.h"
@@ -21,6 +27,7 @@
 /* Linux 下 TCP_INFO 定义通常已在 <netinet/tcp.h> 提供，避免引入 <linux/tcp.h> 重定义 */
 
 struct TcpContext {
+    /* 已建立连接的 socket fd（服务端 accept 后或客户端 connect 后）。 */
     int fd;
 };
 
@@ -66,12 +73,14 @@ static void tcp_log_info(int fd, const char *tag)
 
 static int tcp_set_nodelay(int fd)
 {
+    /* 关闭 Nagle，降低小包时延（更利于交互指令场景）。 */
     int flag = 1;
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
 
 static int tcp_set_reuseaddr(int fd)
 {
+    /* 允许端口快速复用，减少开发/测试时 TIME_WAIT 影响。 */
     int flag = 1;
     return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
 }
@@ -80,12 +89,14 @@ static int tcp_bind_and_listen(struct TcpContext *ctx,
                                const char *bind_ip,
                                uint16_t bind_port)
 {
+    /* 创建监听 socket。 */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         logger_log("ERROR", "tcp", "socket_failed errno=%d", errno);
         return -1;
     }
 
+    /* 监听 socket 打开地址复用。 */
     tcp_set_reuseaddr(fd);
 
     struct sockaddr_in addr;
@@ -100,6 +111,10 @@ static int tcp_bind_and_listen(struct TcpContext *ctx,
         return -1;
     }
 
+    /*
+     * 这里 backlog 取 1，符合当前“单连接演示/测试”场景。
+     * 若后续要支持多客户端，可提升 backlog 并改为事件循环/线程池模型。
+     */
     if (listen(fd, 1) < 0) {
         logger_log("ERROR", "tcp", "listen_failed errno=%d", errno);
         close(fd);
@@ -108,7 +123,7 @@ static int tcp_bind_and_listen(struct TcpContext *ctx,
 
     logger_log("INFO", "tcp", "listening port=%u", (unsigned)bind_port);
 
-    /* 简化：阻塞接受一个客户端，之后用于长连接 */
+    /* 简化：阻塞接受一个客户端，连接建立后作为长连接使用。 */
     int cfd = accept(fd, NULL, NULL);
     if (cfd < 0) {
         logger_log("ERROR", "tcp", "accept_failed errno=%d", errno);
@@ -116,6 +131,7 @@ static int tcp_bind_and_listen(struct TcpContext *ctx,
         return -1;
     }
 
+    /* 监听 fd 仅用于 accept，一旦接入成功即可关闭监听 fd。 */
     close(fd);
     tcp_set_nodelay(cfd);
 
@@ -127,6 +143,7 @@ static int tcp_connect_peer(struct TcpContext *ctx,
                             const char *peer_ip,
                             uint16_t peer_port)
 {
+    /* 创建主动连接 socket。 */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         logger_log("ERROR", "tcp", "socket_failed errno=%d", errno);
@@ -139,6 +156,7 @@ static int tcp_connect_peer(struct TcpContext *ctx,
     addr.sin_port = htons(peer_port);
     addr.sin_addr.s_addr = inet_addr(peer_ip);
 
+    /* 阻塞 connect 到对端。 */
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         logger_log("ERROR", "tcp", "connect_failed errno=%d", errno);
         close(fd);
@@ -154,6 +172,12 @@ static int tcp_connect_peer(struct TcpContext *ctx,
 
 static ssize_t tcp_read_n(int fd, void *buf, size_t n)
 {
+    /*
+     * 从 TCP 流中“恰好读取 n 字节”：
+     * - 正常返回 n
+     * - 返回 0 表示对端关闭（如果发生在中途，返回已读字节数）
+     * - 返回 -1 表示系统调用错误
+     */
     size_t off = 0;
     char *p = (char *)buf;
     while (off < n) {
@@ -172,6 +196,11 @@ static ssize_t tcp_read_n(int fd, void *buf, size_t n)
 
 static ssize_t tcp_write_n(int fd, const void *buf, size_t n)
 {
+    /*
+     * 向 TCP 流中“恰好写入 n 字节”：
+     * - EINTR 自动重试
+     * - 其余错误返回 -1
+     */
     size_t off = 0;
     const char *p = (const char *)buf;
     while (off < n) {
@@ -191,12 +220,14 @@ static OmniContext *tcp_init(OmniRole role,
                              const char *peer_ip,
                              uint16_t peer_port)
 {
+    /* 协议私有上下文（通过 OmniContext* 向上层做不透明传递）。 */
     struct TcpContext *ctx = (struct TcpContext *)calloc(1, sizeof(*ctx));
     if (!ctx) {
         return NULL;
     }
 
     int rc;
+    /* 按角色决定是被动监听还是主动连接。 */
     if (role == OMNI_ROLE_SERVER) {
         rc = tcp_bind_and_listen(ctx, bind_ip, bind_port);
     } else {
@@ -221,15 +252,18 @@ static ssize_t tcp_send(OmniContext *c, const void *buf, size_t len)
     struct TcpContext *ctx = (struct TcpContext *)c;
     if (!ctx || ctx->fd < 0) return OMNI_ERR_PARAM;
 
+    /*
+     * 外层 TCP 帧头（16B）仅用于切分消息边界。
+     * 当前 type 统一标记为 MSG_TYPE_RAW，表示“payload 是上层透传内容”。
+     */
     uint64_t t0 = omni_now_ms();
     MsgHeader hdr;
-    hdr.magic = htonl(MSG_MAGIC);
-    hdr.length = htonl((uint32_t)len);
-    hdr.seq = 0; /* 如有需要，上层可扩展维护序列号 */
+    omni_msg_header_encode(&hdr, MSG_TYPE_RAW, (uint32_t)len, t0);
 
     uint8_t header_buf[MSG_HEADER_SIZE];
     memcpy(header_buf, &hdr, MSG_HEADER_SIZE);
 
+    /* 先写固定头，再写 payload，接收侧可据此恢复完整帧。 */
     ssize_t n1 = tcp_write_n(ctx->fd, header_buf, MSG_HEADER_SIZE);
     if (n1 != (ssize_t)MSG_HEADER_SIZE) {
         return OMNI_ERR_IO;
@@ -241,6 +275,7 @@ static ssize_t tcp_send(OmniContext *c, const void *buf, size_t len)
     }
 
     uint64_t t1 = omni_now_ms();
+    /* 记录协议层发送耗时，便于后续性能分析。 */
     logger_on_proto_send_latency(t1 - t0);
     logger_log("DEBUG", "tcp", "send payload_bytes=%zu header_bytes=%zu proto_ms=%llu",
                len, (size_t)MSG_HEADER_SIZE, (unsigned long long)(t1 - t0));
@@ -255,6 +290,12 @@ static ssize_t tcp_recv(OmniContext *c, void *buf, size_t len)
     struct TcpContext *ctx = (struct TcpContext *)c;
     if (!ctx || ctx->fd < 0) return OMNI_ERR_PARAM;
 
+    /*
+     * 收包流程：
+     * 1) 固定先读 16 字节头
+     * 2) 解析 payload_len
+     * 3) 再读 payload_len 字节
+     */
     uint64_t t0 = omni_now_ms();
     uint8_t header_buf[MSG_HEADER_SIZE];
     ssize_t n1 = tcp_read_n(ctx->fd, header_buf, MSG_HEADER_SIZE);
@@ -265,14 +306,17 @@ static ssize_t tcp_recv(OmniContext *c, void *buf, size_t len)
         return OMNI_ERR_IO;
     }
 
+    /* 解码网络字节序头字段。 */
     MsgHeader hdr;
+    MsgHeader host_hdr;
     memcpy(&hdr, header_buf, MSG_HEADER_SIZE);
-    if (ntohl(hdr.magic) != MSG_MAGIC) {
-        logger_log("ERROR", "tcp", "invalid_magic");
-        return OMNI_ERR_IO;
-    }
+    omni_msg_header_decode(&hdr, &host_hdr);
 
-    uint32_t payload_len = ntohl(hdr.length);
+    uint32_t payload_len = host_hdr.len;
+    /*
+     * 调用方缓冲区不足时直接报错。
+     * 当前实现不做“读取并丢弃剩余字节”，因此调用方应保证 recv 缓冲足够大。
+     */
     if (payload_len > len) {
         logger_log("ERROR", "tcp", "buffer_too_small payload=%u buf_len=%zu",
                    payload_len, len);
@@ -286,9 +330,14 @@ static ssize_t tcp_recv(OmniContext *c, void *buf, size_t len)
     }
 
     uint64_t t1 = omni_now_ms();
+    /* 记录协议层接收耗时。 */
     logger_on_proto_recv_latency(t1 - t0);
-    logger_log("DEBUG", "tcp", "recv payload_bytes=%u header_bytes=%zu proto_ms=%llu",
-               payload_len, (size_t)MSG_HEADER_SIZE, (unsigned long long)(t1 - t0));
+    logger_log("DEBUG", "tcp",
+               "recv payload_bytes=%u header_bytes=%zu msg_type=%u ts_ms=%llu proto_ms=%llu",
+               payload_len, (size_t)MSG_HEADER_SIZE,
+               (unsigned)host_hdr.type,
+               (unsigned long long)host_hdr.timestamp,
+               (unsigned long long)(t1 - t0));
 #ifdef __linux__
     tcp_log_info(ctx->fd, "after_recv");
 #endif
@@ -299,6 +348,7 @@ static void tcp_close(OmniContext *c)
 {
     struct TcpContext *ctx = (struct TcpContext *)c;
     if (!ctx) return;
+    /* 关闭连接并释放私有上下文。 */
     if (ctx->fd >= 0) {
         close(ctx->fd);
     }
