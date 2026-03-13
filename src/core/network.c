@@ -96,6 +96,9 @@ ssize_t omni_send(OmniContext *ctx, const void *buf, size_t len)
     }
     logger_log("DEBUG", "network", "omni_send proto=%d bytes=%zd call_ms=%llu",
                (int)ctx->proto, n, (unsigned long long)(t1 - t0));
+    if (n > 0) {
+        logger_print_performance_log("on_send");
+    }
     return n;
 }
 
@@ -114,6 +117,9 @@ ssize_t omni_recv(OmniContext *ctx, void *buf, size_t len)
     }
     logger_log("DEBUG", "network", "omni_recv proto=%d bytes=%zd call_ms=%llu",
                (int)ctx->proto, n, (unsigned long long)(t1 - t0));
+    if (n > 0) {
+        logger_print_performance_log("on_recv");
+    }
     return n;
 }
 
@@ -126,4 +132,3 @@ void omni_close(OmniContext *ctx)
     logger_print_performance_log("final");
     free(ctx);
 }
-

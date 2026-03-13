@@ -10,13 +10,25 @@
 #include <stdarg.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 static OmniStats g_stats;
 static FILE *g_json_fp = NULL;
+static int g_min_level = 1; /* default INFO */
 
 static uint64_t now_ms(void)
 {
     return omni_now_ms();
+}
+
+static int level_to_int(const char *level)
+{
+    if (!level) return 1;
+    if (strcmp(level, "DEBUG") == 0) return 0;
+    if (strcmp(level, "INFO") == 0) return 1;
+    if (strcmp(level, "WARN") == 0) return 2;
+    if (strcmp(level, "ERROR") == 0) return 3;
+    return 1;
 }
 
 static void ewma_update(double *avg, double sample, double alpha)
@@ -35,6 +47,9 @@ void logger_init(void)
     g_stats.last_report_ms = g_stats.start_ms;
     g_stats.send_call_min_ms = UINT64_MAX;
     g_stats.recv_call_min_ms = UINT64_MAX;
+
+    const char *lvl_env = getenv("OMNI_LOG_LEVEL");
+    g_min_level = level_to_int(lvl_env);
 
     if (!g_json_fp) {
         g_json_fp = fopen("omni_logs.jsonl", "a");
@@ -229,6 +244,10 @@ void logger_log(const char *level, const char *component,
 {
     const char *lvl = level ? level : "INFO";
     const char *comp = component ? component : "general";
+
+    if (level_to_int(lvl) < g_min_level) {
+        return;
+    }
 
     FILE *fp = stderr;
     print_timestamp(fp);

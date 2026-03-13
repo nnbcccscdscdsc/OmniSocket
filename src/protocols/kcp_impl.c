@@ -44,8 +44,6 @@ static OmniContext *kcp_init(OmniRole role,
                              const char *peer_ip,
                              uint16_t peer_port)
 {
-    (void)role;
-
     struct KcpContext *ctx = (struct KcpContext *)calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
 
@@ -78,8 +76,9 @@ static OmniContext *kcp_init(OmniRole role,
 
     ctx->fd = fd;
 
-    /* conv 可简单使用端口号 */
-    IUINT32 conv = (IUINT32)peer_port;
+    /* conv 必须两端一致：server 用 bind_port，client 用 peer_port */
+    IUINT32 conv = (role == OMNI_ROLE_SERVER) ? (IUINT32)bind_port
+                                              : (IUINT32)peer_port;
     ikcpcb *kcp = ikcp_create(conv, ctx);
     if (!kcp) {
         logger_log("ERROR", "kcp", "ikcp_create_failed");
@@ -95,10 +94,11 @@ static OmniContext *kcp_init(OmniRole role,
     ikcp_wndsize(kcp, 128, 128);
 
     logger_log("INFO", "kcp",
-               "init bind_port=%u peer_ip=%s peer_port=%u",
+               "init bind_port=%u peer_ip=%s peer_port=%u conv=%u",
                (unsigned)bind_port,
                peer_ip ? peer_ip : "NULL",
-               (unsigned)peer_port);
+               (unsigned)peer_port,
+               (unsigned)conv);
 
     return (OmniContext *)ctx;
 }

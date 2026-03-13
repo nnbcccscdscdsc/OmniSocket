@@ -51,7 +51,15 @@ static void run_server(OmniProtocol proto, uint16_t port)
     char buf[4096];
     for (;;) {
         ssize_t n = omni_recv(ctx, buf, sizeof(buf));
-        if (n <= 0) {
+        if (n < 0) {
+            logger_log("INFO", "test", "server_recv_end n=%zd", n);
+            break;
+        }
+        if (n == 0) {
+            if (proto == OMNI_PROTO_KCP) {
+                usleep(10 * 1000);
+                continue;
+            }
             logger_log("INFO", "test", "server_recv_end n=%zd", n);
             break;
         }
@@ -98,7 +106,16 @@ static void run_client(OmniProtocol proto, const char *host, uint16_t port)
         if (n <= 0) break;
 
         ssize_t m = omni_recv(ctx, recv_buf, sizeof(recv_buf));
-        if (m <= 0) {
+        if (m < 0) {
+            logger_log("INFO", "test", "client_recv_end i=%d bytes=%zd", i, m);
+            break;
+        }
+        if (m == 0) {
+            if (proto == OMNI_PROTO_KCP) {
+                usleep(10 * 1000);
+                --i;
+                continue;
+            }
             logger_log("INFO", "test", "client_recv_end i=%d bytes=%zd", i, m);
             break;
         }
@@ -158,4 +175,3 @@ int main(int argc, char **argv)
 
     return 0;
 }
-
