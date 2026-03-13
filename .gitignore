@@ -1,3 +1,27 @@
+# === 编译产物 (Compiled files) ===
+# 忽略所有对象文件
 *.o
+
+# === 可执行文件 (Executables) ===
+# 建议将所有可执行文件产出到 build/ 目录，然后忽略整个目录
 build/
-*.out
+# 如果你直接在根目录生成，手动忽略它们（根据你的项目名修改）
+server_pc
+client_arm
+relay_main
+
+# === 编辑器与 IDE (IDE & Editors) ===
+# 忽略 VS Code 配置
+.vscode/
+# 忽略某些编译数据库
+compile_commands.json
+.clangd/
+
+# === 日志与测试数据 (Logs & Data) ===
+# 忽略程序运行生成的日志文件（csv, log等）
+*.log
+*.csv
+# 忽略测试用的视频或大文件
+*.mp4
+*.avi
+*.dat
