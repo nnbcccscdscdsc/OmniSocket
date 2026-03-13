@@ -26,6 +26,20 @@ typedef struct OmniStats {
     uint64_t tcp_retrans;        /* 预留：TCP 重传统计（如可从内核获取） */
     uint64_t udp_retrans;        /* UDP 上层重传次数 */
     uint64_t kcp_retrans;        /* KCP 内部重传次数（可从 ikcp 统计） */
+
+    /* 延迟/耗时统计（单位：毫秒） */
+    double send_call_avg_ms;     /* omni_send 平均耗时（EWMA） */
+    double recv_call_avg_ms;     /* omni_recv 平均耗时（EWMA） */
+    double proto_send_avg_ms;    /* 协议 send() 平均耗时（EWMA） */
+    double proto_recv_avg_ms;    /* 协议 recv() 平均耗时（EWMA） */
+
+    uint64_t send_call_min_ms;
+    uint64_t send_call_max_ms;
+    uint64_t recv_call_min_ms;
+    uint64_t recv_call_max_ms;
+
+    uint64_t last_send_call_ms;
+    uint64_t last_recv_call_ms;
 } OmniStats;
 
 /* 初始化统计模块，在程序启动时调用一次 */
@@ -40,6 +54,12 @@ void logger_on_rtt(uint64_t rtt_ms);
 
 /* 记录 KCP 重传次数变化（可在 KCP 更新循环中调用） */
 void logger_on_kcp_retrans(uint64_t delta);
+
+/* 记录一次耗时（ms） */
+void logger_on_send_call_latency(uint64_t ms);
+void logger_on_recv_call_latency(uint64_t ms);
+void logger_on_proto_send_latency(uint64_t ms);
+void logger_on_proto_recv_latency(uint64_t ms);
 
 /* 计算当前吞吐量（返回：字节/秒） */
 double logger_calculate_throughput(void);

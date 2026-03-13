@@ -87,12 +87,15 @@ ssize_t omni_send(OmniContext *ctx, const void *buf, size_t len)
         return OMNI_ERR_PARAM;
     }
 
+    uint64_t t0 = omni_now_ms();
     ssize_t n = ctx->vt->send((OmniContext *)ctx->impl, buf, len);
+    uint64_t t1 = omni_now_ms();
+    logger_on_send_call_latency(t1 - t0);
     if (n > 0) {
         logger_on_send((size_t)n);
     }
-    logger_log("DEBUG", "network", "omni_send proto=%d bytes=%zd",
-               (int)ctx->proto, n);
+    logger_log("DEBUG", "network", "omni_send proto=%d bytes=%zd call_ms=%llu",
+               (int)ctx->proto, n, (unsigned long long)(t1 - t0));
     return n;
 }
 
@@ -102,12 +105,15 @@ ssize_t omni_recv(OmniContext *ctx, void *buf, size_t len)
         return OMNI_ERR_PARAM;
     }
 
+    uint64_t t0 = omni_now_ms();
     ssize_t n = ctx->vt->recv((OmniContext *)ctx->impl, buf, len);
+    uint64_t t1 = omni_now_ms();
+    logger_on_recv_call_latency(t1 - t0);
     if (n > 0) {
         logger_on_recv((size_t)n);
     }
-    logger_log("DEBUG", "network", "omni_recv proto=%d bytes=%zd",
-               (int)ctx->proto, n);
+    logger_log("DEBUG", "network", "omni_recv proto=%d bytes=%zd call_ms=%llu",
+               (int)ctx->proto, n, (unsigned long long)(t1 - t0));
     return n;
 }
 

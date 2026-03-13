@@ -9,12 +9,23 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <inttypes.h>
 
 static OmniStats g_stats;
+static FILE *g_json_fp = NULL;
 
 static uint64_t now_ms(void)
 {
     return omni_now_ms();
+}
+
+static void ewma_update(double *avg, double sample, double alpha)
+{
+    if (*avg <= 0.0) {
+        *avg = sample;
+        return;
+    }
+    *avg = (*avg) * (1.0 - alpha) + sample * alpha;
 }
 
 void logger_init(void)
@@ -22,6 +33,12 @@ void logger_init(void)
     memset(&g_stats, 0, sizeof(g_stats));
     g_stats.start_ms = now_ms();
     g_stats.last_report_ms = g_stats.start_ms;
+    g_stats.send_call_min_ms = UINT64_MAX;
+    g_stats.recv_call_min_ms = UINT64_MAX;
+
+    if (!g_json_fp) {
+        g_json_fp = fopen("omni_logs.jsonl", "a");
+    }
 }
 
 void logger_on_send(size_t bytes)
@@ -49,6 +66,32 @@ void logger_on_kcp_retrans(uint64_t delta)
     g_stats.kcp_retrans += delta;
 }
 
+void logger_on_send_call_latency(uint64_t ms)
+{
+    g_stats.last_send_call_ms = ms;
+    if (ms < g_stats.send_call_min_ms) g_stats.send_call_min_ms = ms;
+    if (ms > g_stats.send_call_max_ms) g_stats.send_call_max_ms = ms;
+    ewma_update(&g_stats.send_call_avg_ms, (double)ms, 0.2);
+}
+
+void logger_on_recv_call_latency(uint64_t ms)
+{
+    g_stats.last_recv_call_ms = ms;
+    if (ms < g_stats.recv_call_min_ms) g_stats.recv_call_min_ms = ms;
+    if (ms > g_stats.recv_call_max_ms) g_stats.recv_call_max_ms = ms;
+    ewma_update(&g_stats.recv_call_avg_ms, (double)ms, 0.2);
+}
+
+void logger_on_proto_send_latency(uint64_t ms)
+{
+    ewma_update(&g_stats.proto_send_avg_ms, (double)ms, 0.2);
+}
+
+void logger_on_proto_recv_latency(uint64_t ms)
+{
+    ewma_update(&g_stats.proto_recv_avg_ms, (double)ms, 0.2);
+}
+
 double logger_calculate_throughput(void)
 {
     uint64_t now = now_ms();
@@ -66,6 +109,30 @@ static void print_timestamp(FILE *fp)
     fprintf(fp, "ts=%llu ", (unsigned long long)ms);
 }
 
+static void json_escape(const char *src, char *dst, size_t dst_sz)
+{
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 2 < dst_sz; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\' || c == '\"') {
+            dst[j++] = '\\';
+            dst[j++] = (char)c;
+        } else if (c == '\n') {
+            dst[j++] = '\\';
+            dst[j++] = 'n';
+        } else if (c == '\r') {
+            dst[j++] = '\\';
+            dst[j++] = 'r';
+        } else if (c == '\t') {
+            dst[j++] = '\\';
+            dst[j++] = 't';
+        } else {
+            dst[j++] = (char)c;
+        }
+    }
+    dst[j] = '\0';
+}
+
 void logger_print_performance_log(const char *tag)
 {
     uint64_t now = now_ms();
@@ -79,6 +146,9 @@ void logger_print_performance_log(const char *tag)
             "elapsed_ms=%llu bytes_sent=%llu bytes_recv=%llu "
             "send_count=%llu recv_count=%llu "
             "throughput_bytes_per_sec=%.2f "
+            "send_call_last_ms=%llu send_call_min_ms=%llu send_call_max_ms=%llu send_call_avg_ms=%.3f "
+            "recv_call_last_ms=%llu recv_call_min_ms=%llu recv_call_max_ms=%llu recv_call_avg_ms=%.3f "
+            "proto_send_avg_ms=%.3f proto_recv_avg_ms=%.3f "
             "last_rtt_ms=%llu max_rtt_ms=%llu "
             "kcp_retrans=%llu\n",
             tag ? tag : "periodic",
@@ -88,27 +158,106 @@ void logger_print_performance_log(const char *tag)
             (unsigned long long)g_stats.send_count,
             (unsigned long long)g_stats.recv_count,
             thr,
+            (unsigned long long)g_stats.last_send_call_ms,
+            (unsigned long long)((g_stats.send_call_min_ms == UINT64_MAX) ? 0 : g_stats.send_call_min_ms),
+            (unsigned long long)g_stats.send_call_max_ms,
+            g_stats.send_call_avg_ms,
+            (unsigned long long)g_stats.last_recv_call_ms,
+            (unsigned long long)((g_stats.recv_call_min_ms == UINT64_MAX) ? 0 : g_stats.recv_call_min_ms),
+            (unsigned long long)g_stats.recv_call_max_ms,
+            g_stats.recv_call_avg_ms,
+            g_stats.proto_send_avg_ms,
+            g_stats.proto_recv_avg_ms,
             (unsigned long long)g_stats.last_rtt_ms,
             (unsigned long long)g_stats.max_rtt_ms,
             (unsigned long long)g_stats.kcp_retrans);
 
     g_stats.last_report_ms = now;
+
+    if (g_json_fp) {
+        fprintf(g_json_fp,
+                "{\"ts_ms\":%llu,"
+                "\"level\":\"INFO\","
+                "\"component\":\"perf\","
+                "\"tag\":\"%s\","
+                "\"elapsed_ms\":%llu,"
+                "\"bytes_sent\":%llu,"
+                "\"bytes_recv\":%llu,"
+                "\"send_count\":%llu,"
+                "\"recv_count\":%llu,"
+                "\"throughput_bytes_per_sec\":%.6f,"
+                "\"send_call_last_ms\":%llu,"
+                "\"send_call_min_ms\":%llu,"
+                "\"send_call_max_ms\":%llu,"
+                "\"send_call_avg_ms\":%.6f,"
+                "\"recv_call_last_ms\":%llu,"
+                "\"recv_call_min_ms\":%llu,"
+                "\"recv_call_max_ms\":%llu,"
+                "\"recv_call_avg_ms\":%.6f,"
+                "\"proto_send_avg_ms\":%.6f,"
+                "\"proto_recv_avg_ms\":%.6f,"
+                "\"last_rtt_ms\":%llu,"
+                "\"max_rtt_ms\":%llu,"
+                "\"kcp_retrans\":%llu}\n",
+                (unsigned long long)now,
+                tag ? tag : "periodic",
+                (unsigned long long)elapsed_ms,
+                (unsigned long long)g_stats.bytes_sent,
+                (unsigned long long)g_stats.bytes_recv,
+                (unsigned long long)g_stats.send_count,
+                (unsigned long long)g_stats.recv_count,
+                thr,
+                (unsigned long long)g_stats.last_send_call_ms,
+                (unsigned long long)((g_stats.send_call_min_ms == UINT64_MAX) ? 0 : g_stats.send_call_min_ms),
+                (unsigned long long)g_stats.send_call_max_ms,
+                g_stats.send_call_avg_ms,
+                (unsigned long long)g_stats.last_recv_call_ms,
+                (unsigned long long)((g_stats.recv_call_min_ms == UINT64_MAX) ? 0 : g_stats.recv_call_min_ms),
+                (unsigned long long)g_stats.recv_call_max_ms,
+                g_stats.recv_call_avg_ms,
+                g_stats.proto_send_avg_ms,
+                g_stats.proto_recv_avg_ms,
+                (unsigned long long)g_stats.last_rtt_ms,
+                (unsigned long long)g_stats.max_rtt_ms,
+                (unsigned long long)g_stats.kcp_retrans);
+        fflush(g_json_fp);
+    }
 }
 
 void logger_log(const char *level, const char *component,
                 const char *fmt, ...)
 {
+    const char *lvl = level ? level : "INFO";
+    const char *comp = component ? component : "general";
+
     FILE *fp = stderr;
     print_timestamp(fp);
-    fprintf(fp, "level=%s component=%s ", level ? level : "INFO",
-            component ? component : "general");
+    fprintf(fp, "level=%s component=%s ", lvl, comp);
 
+    char msg_buf[1024];
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
+    vsnprintf(msg_buf, sizeof(msg_buf), fmt, ap);
     va_end(ap);
 
+    fputs(msg_buf, fp);
     fputc('\n', fp);
+
+    if (g_json_fp) {
+        char esc_buf[2048];
+        json_escape(msg_buf, esc_buf, sizeof(esc_buf));
+        uint64_t ts = now_ms();
+        fprintf(g_json_fp,
+                "{\"ts_ms\":%llu,"
+                "\"level\":\"%s\","
+                "\"component\":\"%s\","
+                "\"message\":\"%s\"}\n",
+                (unsigned long long)ts,
+                lvl,
+                comp,
+                esc_buf);
+        fflush(g_json_fp);
+    }
 }
 
 OmniStats logger_get_snapshot(void)

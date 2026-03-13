@@ -22,6 +22,7 @@ struct KcpContext {
     struct sockaddr_in peer_addr;
     socklen_t peer_len;
     ikcpcb *kcp;
+    uint32_t last_xmit; /* 用于推算重传/发送次数变化 */
 };
 
 static int kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
@@ -104,6 +105,7 @@ static OmniContext *kcp_init(OmniRole role,
 
 static void kcp_update_loop(struct KcpContext *ctx)
 {
+    uint64_t t0 = omni_now_ms();
     IUINT32 current = (IUINT32)omni_now_ms();
     ikcp_update(ctx->kcp, current);
 
@@ -117,6 +119,32 @@ static void kcp_update_loop(struct KcpContext *ctx)
         ctx->peer_len = fromlen;
         ikcp_input(ctx->kcp, buf, (long)n);
     }
+
+    /* KCP 内部状态监控 */
+    uint32_t xmit = ctx->kcp->xmit;
+    if (xmit >= ctx->last_xmit) {
+        logger_on_kcp_retrans((uint64_t)(xmit - ctx->last_xmit));
+    }
+    ctx->last_xmit = xmit;
+
+    uint64_t t1 = omni_now_ms();
+    logger_log("DEBUG", "kcp",
+               "update ms=%llu cwnd=%u ssthresh=%u rmt_wnd=%u snd_wnd=%u rcv_wnd=%u "
+               "rx_srtt=%u rx_rto=%u nsnd_buf=%u nsnd_que=%u nrcv_buf=%u nrcv_que=%u xmit=%u state=%u",
+               (unsigned long long)(t1 - t0),
+               (unsigned)ctx->kcp->cwnd,
+               (unsigned)ctx->kcp->ssthresh,
+               (unsigned)ctx->kcp->rmt_wnd,
+               (unsigned)ctx->kcp->snd_wnd,
+               (unsigned)ctx->kcp->rcv_wnd,
+               (unsigned)ctx->kcp->rx_srtt,
+               (unsigned)ctx->kcp->rx_rto,
+               (unsigned)ctx->kcp->nsnd_buf,
+               (unsigned)ctx->kcp->nsnd_que,
+               (unsigned)ctx->kcp->nrcv_buf,
+               (unsigned)ctx->kcp->nrcv_que,
+               (unsigned)ctx->kcp->xmit,
+               (unsigned)ctx->kcp->state);
 }
 
 static ssize_t kcp_send(OmniContext *c, const void *buf, size_t len)
@@ -124,6 +152,7 @@ static ssize_t kcp_send(OmniContext *c, const void *buf, size_t len)
     struct KcpContext *ctx = (struct KcpContext *)c;
     if (!ctx || !ctx->kcp) return OMNI_ERR_PARAM;
 
+    uint64_t t0 = omni_now_ms();
     int rc = ikcp_send(ctx->kcp, (const char *)buf, (int)len);
     if (rc < 0) {
         logger_log("ERROR", "kcp", "ikcp_send_failed rc=%d", rc);
@@ -132,6 +161,10 @@ static ssize_t kcp_send(OmniContext *c, const void *buf, size_t len)
 
     /* 驱动一次 flush */
     kcp_update_loop(ctx);
+    uint64_t t1 = omni_now_ms();
+    logger_on_proto_send_latency(t1 - t0);
+    logger_log("DEBUG", "kcp", "send payload_bytes=%zu proto_ms=%llu waitsnd=%d",
+               len, (unsigned long long)(t1 - t0), ikcp_waitsnd(ctx->kcp));
     return (ssize_t)len;
 }
 
@@ -140,12 +173,17 @@ static ssize_t kcp_recv(OmniContext *c, void *buf, size_t len)
     struct KcpContext *ctx = (struct KcpContext *)c;
     if (!ctx || !ctx->kcp) return OMNI_ERR_PARAM;
 
+    uint64_t t0 = omni_now_ms();
     kcp_update_loop(ctx);
 
     int n = ikcp_recv(ctx->kcp, (char *)buf, (int)len);
     if (n < 0) {
         return 0; /* 暂无数据 */
     }
+    uint64_t t1 = omni_now_ms();
+    logger_on_proto_recv_latency(t1 - t0);
+    logger_log("DEBUG", "kcp", "recv payload_bytes=%d proto_ms=%llu",
+               n, (unsigned long long)(t1 - t0));
     return (ssize_t)n;
 }
 

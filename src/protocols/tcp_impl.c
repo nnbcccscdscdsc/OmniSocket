@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/tcp.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,9 +18,51 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* Linux 下 TCP_INFO 定义通常已在 <netinet/tcp.h> 提供，避免引入 <linux/tcp.h> 重定义 */
+
 struct TcpContext {
     int fd;
 };
+
+#ifdef __linux__
+static void tcp_log_info(int fd, const char *tag)
+{
+    struct tcp_info ti;
+    socklen_t len = sizeof(ti);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &ti, &len) != 0) {
+        return;
+    }
+
+    /* 注意：tcpi_rtt 单位通常为微秒（Linux），这里转 ms 仅用于日志观察 */
+    unsigned long long rtt_ms = (unsigned long long)(ti.tcpi_rtt / 1000u);
+    unsigned long long rttvar_ms = (unsigned long long)(ti.tcpi_rttvar / 1000u);
+
+    logger_log("INFO", "tcpinfo",
+               "tag=%s state=%u retransmits=%u probes=%u backoff=%u "
+               "rto=%u ato=%u rtt_ms=%llu rttvar_ms=%llu "
+               "snd_cwnd=%u snd_ssthresh=%u snd_mss=%u rcv_mss=%u "
+               "lost=%u retrans=%u fackets=%u "
+               "last_data_sent_ms=%u last_data_recv_ms=%u",
+               tag ? tag : "sample",
+               (unsigned)ti.tcpi_state,
+               (unsigned)ti.tcpi_retransmits,
+               (unsigned)ti.tcpi_probes,
+               (unsigned)ti.tcpi_backoff,
+               (unsigned)ti.tcpi_rto,
+               (unsigned)ti.tcpi_ato,
+               rtt_ms,
+               rttvar_ms,
+               (unsigned)ti.tcpi_snd_cwnd,
+               (unsigned)ti.tcpi_snd_ssthresh,
+               (unsigned)ti.tcpi_snd_mss,
+               (unsigned)ti.tcpi_rcv_mss,
+               (unsigned)ti.tcpi_lost,
+               (unsigned)ti.tcpi_retrans,
+               (unsigned)ti.tcpi_fackets,
+               (unsigned)ti.tcpi_last_data_sent,
+               (unsigned)ti.tcpi_last_data_recv);
+}
+#endif
 
 static int tcp_set_nodelay(int fd)
 {
@@ -178,6 +221,7 @@ static ssize_t tcp_send(OmniContext *c, const void *buf, size_t len)
     struct TcpContext *ctx = (struct TcpContext *)c;
     if (!ctx || ctx->fd < 0) return OMNI_ERR_PARAM;
 
+    uint64_t t0 = omni_now_ms();
     MsgHeader hdr;
     hdr.magic = htonl(MSG_MAGIC);
     hdr.length = htonl((uint32_t)len);
@@ -196,6 +240,13 @@ static ssize_t tcp_send(OmniContext *c, const void *buf, size_t len)
         return OMNI_ERR_IO;
     }
 
+    uint64_t t1 = omni_now_ms();
+    logger_on_proto_send_latency(t1 - t0);
+    logger_log("DEBUG", "tcp", "send payload_bytes=%zu header_bytes=%zu proto_ms=%llu",
+               len, (size_t)MSG_HEADER_SIZE, (unsigned long long)(t1 - t0));
+#ifdef __linux__
+    tcp_log_info(ctx->fd, "after_send");
+#endif
     return (ssize_t)len;
 }
 
@@ -204,6 +255,7 @@ static ssize_t tcp_recv(OmniContext *c, void *buf, size_t len)
     struct TcpContext *ctx = (struct TcpContext *)c;
     if (!ctx || ctx->fd < 0) return OMNI_ERR_PARAM;
 
+    uint64_t t0 = omni_now_ms();
     uint8_t header_buf[MSG_HEADER_SIZE];
     ssize_t n1 = tcp_read_n(ctx->fd, header_buf, MSG_HEADER_SIZE);
     if (n1 <= 0) {
@@ -233,6 +285,13 @@ static ssize_t tcp_recv(OmniContext *c, void *buf, size_t len)
         return OMNI_ERR_IO;
     }
 
+    uint64_t t1 = omni_now_ms();
+    logger_on_proto_recv_latency(t1 - t0);
+    logger_log("DEBUG", "tcp", "recv payload_bytes=%u header_bytes=%zu proto_ms=%llu",
+               payload_len, (size_t)MSG_HEADER_SIZE, (unsigned long long)(t1 - t0));
+#ifdef __linux__
+    tcp_log_info(ctx->fd, "after_recv");
+#endif
     return (ssize_t)payload_len;
 }
 
