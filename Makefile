@@ -39,6 +39,12 @@ CLIENT_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(APP_CLIENT_SRC))
 SERVER_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(APP_SERVER_SRC))
 RELAY_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(APP_RELAY_SRC))
 
+# 按目标清理时，仅删除对应可执行文件与专属入口对象，避免影响其它产物。
+CLIENT_CLEAN_FILES := $(BUILD_DIR)/omni_client $(CLIENT_OBJ)
+ARM64_BUILD_DIR ?= build/arm64
+ARM64_CLIENT_OBJ := $(patsubst %.c,$(ARM64_BUILD_DIR)/%.o,$(APP_CLIENT_SRC))
+ARM64_CLIENT_CLEAN_FILES := $(ARM64_BUILD_DIR)/omni_client $(ARM64_CLIENT_OBJ)
+
 # 默认构建目标：4 个可执行程序。
 TARGETS := \
 	$(BUILD_DIR)/omni_test \
@@ -46,7 +52,7 @@ TARGETS := \
 	$(BUILD_DIR)/omni_server \
 	$(BUILD_DIR)/omni_relay
 
-.PHONY: all arm clean help
+.PHONY: all arm clean clean-client clean-arm64-client help
 
 # 本机构建入口。
 all: $(TARGETS)
@@ -75,6 +81,14 @@ $(BUILD_DIR)/%.o: %.c
 arm:
 	$(MAKE) BUILD_DIR=build/arm CC=$(ARM_CC) all
 
+# 仅清理当前 BUILD_DIR 下的 omni_client 与其入口对象。
+clean-client:
+	rm -f $(CLIENT_CLEAN_FILES)
+
+# 仅清理 build/arm64 下的 omni_client 与其入口对象。
+clean-arm64-client:
+	rm -f $(ARM64_CLIENT_CLEAN_FILES)
+
 # 清理构建目录。
 clean:
 	rm -rf build
@@ -83,4 +97,6 @@ clean:
 help:
 	@echo "make        -> build native binaries in build/"
 	@echo "make arm    -> build ARM binaries in build/arm (arm-linux-gnueabihf-gcc)"
+	@echo "make clean-client       -> remove omni_client and client_main.o in BUILD_DIR"
+	@echo "make clean-arm64-client -> remove omni_client and client_main.o in build/arm64"
 	@echo "make clean  -> remove build artifacts"
